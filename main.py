@@ -1,7 +1,7 @@
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 
 app = FastAPI()
 
@@ -18,7 +18,11 @@ def homepage():
 
 
 @app.get("/books")
-def list_books(author: str | None = None, skip: int = 0, limit: int = 10):
+def list_books(
+    author: str | None = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=50),
+):
     filtered = BOOKS
     if author:
         filtered = [book for book in BOOKS if author.lower() in book["author"].lower()]
@@ -26,17 +30,20 @@ def list_books(author: str | None = None, skip: int = 0, limit: int = 10):
 
 
 class BookCreate(BaseModel):
-    title: str
-    author: str
+    title: str = Field(..., min_length=1, max_length=100)
+    author: str = Field(..., min_length=1, max_length=100)
 
 
 class BookUpdate(BaseModel):
-    title: Optional[str] = None
-    author: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=100)
+    author: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
 @app.post("/books", status_code=201)
 def create_book(book: BookCreate):
+    for existing in BOOKS:
+        if existing["title"].lower() == book.title.lower():
+            raise HTTPException(status_code=400, detail="Book title already exists")
     new_id = BOOKS[-1]["id"] + 1 if BOOKS else 1
     new_book = {"id": new_id, **book.model_dump()}
     BOOKS.append(new_book)
