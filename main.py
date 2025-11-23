@@ -60,6 +60,9 @@ def get_book(book_id: int):
 
 @app.put("/books/{book_id}")
 def update_book(book_id: int, book: BookCreate):
+    for existing in BOOKS:
+        if existing["id"] != book_id and existing["title"].lower() == book.title.lower():
+            raise HTTPException(status_code=400, detail="Book title already exists")
     for index, existing_book in enumerate(BOOKS):
         if existing_book["id"] == book_id:
             updated = {"id": book_id, **book.model_dump()}
@@ -73,6 +76,10 @@ def partial_update_book(book_id: int, book: BookUpdate):
     for index, existing_book in enumerate(BOOKS):
         if existing_book["id"] == book_id:
             book_data = book.model_dump(exclude_unset=True)
+            if "title" in book_data:
+                for other in BOOKS:
+                    if other["id"] != book_id and other["title"].lower() == book_data["title"].lower():
+                        raise HTTPException(status_code=400, detail="Book title already exists")
             BOOKS[index] = {**existing_book, **book_data}
             return BOOKS[index]
     raise HTTPException(status_code=404, detail="Book not found")
