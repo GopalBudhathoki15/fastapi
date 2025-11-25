@@ -1,32 +1,56 @@
-import copy
 import pathlib
 import sys
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import main  # noqa: E402  # placed after path setup
+import main  # noqa: E402
+from main import Book  # noqa: E402
+
+
+test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+
+
+def seed_data():
+    with Session(test_engine) as session:
+        session.add_all(
+            [
+                Book(id=1, title="Clean Code", author="Robert C. Martin"),
+                Book(id=2, title="Deep Work", author="Cal Newport"),
+                Book(id=3, title="Atomic Habits", author="James Clear"),
+            ]
+        )
+        session.commit()
 
 
 @pytest.fixture(autouse=True)
-def reset_books():
-    """Reset in-memory data before each test."""
-    main.BOOKS[:] = copy.deepcopy(
-        [
-            {"id": 1, "title": "Clean Code", "author": "Robert C. Martin"},
-            {"id": 2, "title": "Deep Work", "author": "Cal Newport"},
-            {"id": 3, "title": "Atomic Habits", "author": "James Clear"},
-        ]
-    )
+def use_test_db():
+    SQLModel.metadata.drop_all(test_engine)
+    SQLModel.metadata.create_all(test_engine)
+    seed_data()
+
+    def get_test_session():
+        SQLModel.metadata.create_all(test_engine)
+        with Session(test_engine) as session:
+            yield session
+
+    main.app.dependency_overrides[main.get_session] = get_test_session
     yield
+    main.app.dependency_overrides.clear()
 
 
 @pytest.fixture()
-def client():
+def client(use_test_db):
     return TestClient(main.app)
 
 

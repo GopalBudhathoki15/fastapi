@@ -1,32 +1,21 @@
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlmodel import Field as SQLField
+from sqlmodel import Session, SQLModel, create_engine, select
+from sqlalchemy import func
 
 app = FastAPI()
 
-BOOKS = [
-    {"id": 1, "title": "Clean Code", "author": "Robert C. Martin"},
-    {"id": 2, "title": "Deep Work", "author": "Cal Newport"},
-    {"id": 3, "title": "Atomic Habits", "author": "James Clear"},
-]
+sqlite_url = "sqlite:///./books.db"
+engine = create_engine(sqlite_url, echo=False)
 
 
-@app.get("/")
-def homepage():
-    return {"message": "This is your homepage"}
-
-
-@app.get("/books")
-def list_books(
-    author: str | None = None,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=50),
-):
-    filtered = BOOKS
-    if author:
-        filtered = [book for book in BOOKS if author.lower() in book["author"].lower()]
-    return {"items": filtered[skip : skip + limit], "total": len(filtered)}
+class Book(SQLModel, table=True):
+    id: Optional[int] = SQLField(default=None, primary_key=True)
+    title: str
+    author: str
 
 
 class BookCreate(BaseModel):
@@ -39,56 +28,109 @@ class BookUpdate(BaseModel):
     author: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
+def init_db():
+    SQLModel.metadata.create_all(engine)
+
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
+init_db()
+
+
+@app.get("/")
+def homepage():
+    return {"message": "This is your homepage"}
+
+
+@app.get("/books")
+def list_books(
+    author: str | None = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=50),
+    session: Session = Depends(get_session),
+):
+    query = select(Book)
+    if author:
+        query = query.where(func.lower(Book.author).like(f"%{author.lower()}%"))
+    all_matches = session.exec(query).all()
+    items = all_matches[skip : skip + limit]
+    return {"items": items, "total": len(all_matches)}
+
+
 @app.post("/books", status_code=201)
-def create_book(book: BookCreate):
-    for existing in BOOKS:
-        if existing["title"].lower() == book.title.lower():
-            raise HTTPException(status_code=400, detail="Book title already exists")
-    new_id = BOOKS[-1]["id"] + 1 if BOOKS else 1
-    new_book = {"id": new_id, **book.model_dump()}
-    BOOKS.append(new_book)
-    return new_book
+def create_book(book: BookCreate, session: Session = Depends(get_session)):
+    existing = session.exec(
+        select(Book).where(func.lower(Book.title) == book.title.lower())
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Book title already exists")
+    db_book = Book(**book.model_dump())
+    session.add(db_book)
+    session.commit()
+    session.refresh(db_book)
+    return db_book
 
 
 @app.get("/books/{book_id}")
-def get_book(book_id: int):
-    for book in BOOKS:
-        if book["id"] == book_id:
-            return book
-    raise HTTPException(status_code=404, detail="Book not found")
+def get_book(book_id: int, session: Session = Depends(get_session)):
+    book = session.get(Book, book_id)
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    return book
 
 
 @app.put("/books/{book_id}")
-def update_book(book_id: int, book: BookCreate):
-    for existing in BOOKS:
-        if existing["id"] != book_id and existing["title"].lower() == book.title.lower():
-            raise HTTPException(status_code=400, detail="Book title already exists")
-    for index, existing_book in enumerate(BOOKS):
-        if existing_book["id"] == book_id:
-            updated = {"id": book_id, **book.model_dump()}
-            BOOKS[index] = updated
-            return updated
-    raise HTTPException(status_code=404, detail="Book not found")
+def update_book(book_id: int, book: BookCreate, session: Session = Depends(get_session)):
+    db_book = session.get(Book, book_id)
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    conflict = session.exec(
+        select(Book).where(Book.id != book_id, func.lower(Book.title) == book.title.lower())
+    ).first()
+    if conflict:
+        raise HTTPException(status_code=400, detail="Book title already exists")
+    db_book.title = book.title
+    db_book.author = book.author
+    session.add(db_book)
+    session.commit()
+    session.refresh(db_book)
+    return db_book
 
 
 @app.patch("/books/{book_id}")
-def partial_update_book(book_id: int, book: BookUpdate):
-    for index, existing_book in enumerate(BOOKS):
-        if existing_book["id"] == book_id:
-            book_data = book.model_dump(exclude_unset=True)
-            if "title" in book_data:
-                for other in BOOKS:
-                    if other["id"] != book_id and other["title"].lower() == book_data["title"].lower():
-                        raise HTTPException(status_code=400, detail="Book title already exists")
-            BOOKS[index] = {**existing_book, **book_data}
-            return BOOKS[index]
-    raise HTTPException(status_code=404, detail="Book not found")
+def partial_update_book(
+    book_id: int, book: BookUpdate, session: Session = Depends(get_session)
+):
+    db_book = session.get(Book, book_id)
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    book_data = book.model_dump(exclude_unset=True)
+    if "title" in book_data:
+        conflict = session.exec(
+            select(Book).where(
+                Book.id != book_id,
+                func.lower(Book.title) == book_data["title"].lower(),
+            )
+        ).first()
+        if conflict:
+            raise HTTPException(status_code=400, detail="Book title already exists")
+        db_book.title = book_data["title"]
+    if "author" in book_data:
+        db_book.author = book_data["author"]
+    session.add(db_book)
+    session.commit()
+    session.refresh(db_book)
+    return db_book
 
 
 @app.delete("/books/{book_id}", status_code=204)
-def delete_book(book_id: int):
-    for index, existing_book in enumerate(BOOKS):
-        if existing_book["id"] == book_id:
-            BOOKS.pop(index)
-            return
-    raise HTTPException(status_code=404, detail="Book not found")
+def delete_book(book_id: int, session: Session = Depends(get_session)):
+    db_book = session.get(Book, book_id)
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    session.delete(db_book)
+    session.commit()
+    return
