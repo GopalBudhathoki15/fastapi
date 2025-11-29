@@ -1,20 +1,21 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class BookBase(BaseModel):
     author: str
     title: str
 
+
 class BookCreate(BookBase):
     pass
 
+
 class BookUpdate(BaseModel):
-    author:str|None = None
-    title:str|None = None
+    title: str | None = None
+    author: str | None = None
 
 
 class BookOut(BookBase):
-    id:int
+    id: int
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
