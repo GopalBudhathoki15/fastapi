@@ -3,3 +3,5 @@
 /practice.py
 /__pycache__
 /playground.py
+/.pytest_cache
+/books.db
